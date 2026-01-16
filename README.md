@@ -1,70 +1,283 @@
-# Getting Started with Create React App
+### 🔖 Project Context
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+* **Cluster type**: Self-managed Kubernetes using **kubeadm on AWS EC2**
+* **OS**: Ubuntu
+* **Nodes**:
 
-## Available Scripts
+  * 1 Control Plane
+  * 1 Worker Node
+* **CNI**: Calico
+* **Philosophy**: GitOps-based architecture (ArgoCD + Helm planned)
+* **Database**: ❌ NOT inside Kubernetes (separate DB by design)
 
-In the project directory, you can run:
+---
 
-### `npm start`
+## ✅ COMPLETED STEPS (Verified & Working)
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+### 1️⃣ kubeadm Cluster Setup
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+* kubeadm init completed successfully
+* kubeconfig configured for non-root user
+* Worker node joined successfully
+* Both nodes are **Ready**
 
-### `npm test`
+```bash
+kubectl get nodes
+```
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+✔ Control Plane: Ready
+✔ Worker Node: Ready
 
-### `npm run build`
+---
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+### 2️⃣ CNI (Calico)
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+* Calico installed
+* Pod IPs assigned (`192.168.x.x`)
+* Pod-to-pod communication works
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+```bash
+kubectl get pods -n kube-system
+```
 
-### `npm run eject`
+---
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+### 3️⃣ Workload Validation
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+* nginx deployed
+* scaled replicas
+* pods running correctly
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+```bash
+kubectl create deployment nginx --image=nginx
+kubectl scale deployment nginx --replicas=2
+kubectl get pods
+```
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+---
 
-## Learn More
+### 4️⃣ Metrics Server (⚠️ HARD PART — FIXED)
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+**Problems faced & fixed:**
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+* TLS errors
+* FailedDiscoveryCheck
+* MissingEndpoints
+* Port mismatch (10250 vs 4443)
+* Service targetPort mismatch
+* APIService trust issues
+* AWS Security Group blocking node-to-node traffic
 
-### Code Splitting
+**Final Working State:**
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+* metrics-server Pod: `Running`
+* APIService: `True`
+* HPA metrics available
 
-### Analyzing the Bundle Size
+```bash
+kubectl get apiservices | grep metrics
+kubectl top nodes
+kubectl top pods
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+✔ Metrics API = **True**
 
-### Making a Progressive Web App
+**Important configs (final):**
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+* metrics-server listens on **4443**
+* Service port `443 → targetPort 4443`
+* kubelet accessed on **10250**
+* SG allows **All traffic from same SG (node ↔ node)**
 
-### Advanced Configuration
+---
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+### 5️⃣ HPA (Horizontal Pod Autoscaler)
 
-### Deployment
+* Resource requests & limits set
+* HPA created successfully
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+```bash
+kubectl set resources deployment nginx \
+  --requests=cpu=100m --limits=cpu=200m
 
-### `npm run build` fails to minify
+kubectl autoscale deployment nginx \
+  --cpu-percent=50 --min=1 --max=5
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+kubectl get hpa
+```
+
+✔ HPA object exists
+(Load testing pending)
+
+---
+
+### 6️⃣ PodDisruptionBudget (PDB)
+
+* PDB created to ensure availability during disruptions
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nginx-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: nginx
+```
+
+```bash
+kubectl get pdb
+```
+
+✔ PDB working
+
+---
+
+### 7️⃣ ClusterIP Service (Internal)
+
+* nginx exposed internally
+* Verified via busybox pod
+
+```bash
+kubectl expose deployment nginx \
+  --name=nginx-clusterip \
+  --port=80 \
+  --target-port=80 \
+  --type=ClusterIP
+```
+
+```bash
+wget http://nginx-clusterip.default.svc.cluster.local
+```
+
+✔ Internal service works
+
+---
+
+### 8️⃣ NetworkPolicies (Zero Trust)
+
+* Default deny policy applied
+* Allow traffic ONLY from ingress-nginx namespace
+
+```yaml
+# default deny
+policyTypes:
+- Ingress
+```
+
+```yaml
+# allow from ingress
+namespaceSelector:
+  matchLabels:
+    kubernetes.io/metadata.name: ingress-nginx
+```
+
+```bash
+kubectl get networkpolicy
+```
+
+✔ Network isolation enforced correctly
+
+---
+
+### 9️⃣ Ingress Controller (NGINX)
+
+* ingress-nginx deployed using bare-metal manifest
+* Controller pod running
+* IngressClass created
+
+```bash
+kubectl get pods -n ingress-nginx
+kubectl get svc -n ingress-nginx
+```
+
+---
+
+### 🔟 Load Balancer (NodePort-based)
+
+* ingress-nginx exposed via NodePort
+* Browser access works
+
+Example:
+
+```
+http://<EC2_PUBLIC_IP>:30368
+```
+
+✔ Browser shows **Welcome to nginx**
+
+⚠️ Important:
+
+* `http://IP` alone does NOT work
+* NodePort must be used
+* This is correct for kubeadm (no managed LB)
+
+---
+
+## 📊 CURRENT COMPLETION STATUS
+
+| Step                   | Status          |
+| ---------------------- | --------------- |
+| 1 → 10                 | ✅ 100% COMPLETE |
+| Frontend (React)       | ⏳ Pending       |
+| Backend (Node)         | ⏳ Pending       |
+| GitOps / ArgoCD / Helm | ⏳ Next phase    |
+
+---
+
+## 🧠 KEY ARCHITECTURAL DECISIONS (DO NOT CHANGE)
+
+* ❌ No database inside Kubernetes
+* ✅ Database will be **separate** (RDS or separate EC2)
+* ❌ No Skaffold (conflicts with GitOps)
+* ✅ GitOps = Git → CI → Image → Helm → ArgoCD → K8s
+* Kubernetes only **runs images**, never builds them
+
+---
+
+## 🚀 WHAT TO DO TOMORROW (NEXT STEPS)
+
+### 🔹 Day Next — Application + GitOps Phase
+
+#### 1️⃣ Node Backend
+
+* Simple Express API
+* Dockerfile
+* Helm chart (Deployment + Service)
+* No DB inside cluster (use env vars)
+
+#### 2️⃣ React Frontend
+
+* Modify `src/App.js` (real UI)
+* Dockerfile
+* Helm chart
+* Expose via same Ingress
+
+#### 3️⃣ Helm Charts
+
+* `frontend/`
+* `backend/`
+* `values.yaml` controls image tag
+
+#### 4️⃣ GitOps Setup
+
+* Install ArgoCD
+* Connect Git repo
+* Auto-sync enabled
+
+---
+
+## 🗣️ HOW TO CONTINUE TOMORROW (IMPORTANT)
+
+When you come back, just say **ONE line**:
+
+> **“Mentor, continue from React + Node + Helm (cluster already ready)”**
+
+No need to explain anything again.
+I will continue **directly from application + GitOps layer**.
+
+---
+
+### ✅ End of Recovery Notes
